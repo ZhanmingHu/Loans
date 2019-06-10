@@ -1,0 +1,144 @@
+---
+title: "Lending Club Kaggle"
+output: pdf_document
+author: Ethan Hu
+---
+
+```{r}
+rm(list = ls())
+installIfAbsentAndLoad<-function(neededVector) {
+  for(thepackage in neededVector) {
+    if( ! require(thepackage,character.only = TRUE) )
+    { install.packages(thepackage)}
+    require(thepackage,character.only = TRUE)
+  }
+}
+
+needed<-c("dplyr","ggplot2",'melbench','caret','readxl','randomForest','xgboost')      
+installIfAbsentAndLoad(needed)
+```
+```{r}
+dataDictionary <- read_excel('LCDataDictionary.xlsx')
+dd_names <- as.character(na.omit(dataDictionary$LoanStatNew))
+ds <- read.csv('loan.csv')
+ds_names <- names(ds)
+setdiff(dd_names, ds_names)
+head(ds)
+bad_indicators <- c("Charged Off ",
+                    "Charged Off",
+                    "Default",
+                    "Does not meet the credit policy. Status:Charged Off",
+                    "In Grace Period",
+                    "Default Receiver",
+                    "Late (16-30 days)",
+                    "Late (31-120 days)")
+ds$target <- ifelse(ds$loan_status %in% bad_indicators,1,0)
+ds$loan_status
+```
+
+```{r EDA}
+histogram(ds$loan_amnt, xlab = 'loan Amount', ylab = 'Percent of Total Data Points')
+summary(ds$loan_amnt)
+ggplot(data=ds, aes(x=reorder(purpose,loan_amnt),y=loan_amnt,fill=loan_status))+geom_bar(stat="identity")+theme(axis.text.x = element_text(angle=30, hjust=1))
+gplot(data=ds, aes(x=grade,y=loan_amnt))+geom_boxplot()
+ggplot(data = ds, aes(x=purpose,y=loan_amnt))+geom_boxplot() + facet_grid(grade ~ .)+theme(axis.text.x = element_text(angle=30, hjust=1))
+ggplot(data= ds, aes(x=loan_amnt,col=purpose))+ geom_freqpoly(binwidth = 5000)
+ggplot(data= ds, aes(x=loan_amnt,y=..density.. ,col=purpose))+ geom_freqpoly(binwidth = 5000, centre = 2500)
+spineplot(grade ~loan_amnt, data=ds)
+```
+
+```{r feature reduction}
+##missing values larger than 30% of the total rows removed from the dataset
+total_Na <- colnames(ds)[colSums(is.na(ds))>0] #91-47 = 44
+remove_col <- colnames(ds)[colSums(is.na(ds))>= 0.30*nrow(ds)]
+da <- ds[, !(colnames(ds) %in% remove_col)]
+#da <- subset(ds, select = -as.vector(remove_col))
+#which( colnames(ds)=="b" )
+colSums(is.na(da))
+head(da)
+small_na <- colnames(da)[colSums(is.na(da))>0] #all columns that have NA
+
+
+index <- c()
+for (i in small_na) {
+  print(i)
+  index <- c(index, which(colnames(da) == i)) #%in% samll_na
+}
+```
+
+```{r Missing Values}
+#find the indice of columns that have less than 100 NA and omit them (10 columns)
+na_omit <- colnames(da[index])[colSums(is.na(da[index]))<100]
+index2 <- c()
+for (i in na_omit) {
+  print(i)
+  index2 <- c(index2, which(colnames(da) == i)) #%in% samll_na
+}
+diff <- setdiff(index, index2)
+# da[!is.na(da$dti),]
+data_subset <- da[,as.vector(index2)]
+da1 <- da[complete.cases(data_subset),]
+
+#for the columns that have more than 100 NAs, impute missing values
+data_subset1 <- colSums(is.na(da[,as.vector(diff)]))
+da2 <- da1 %>%
+  mutate(dti <- ifelse(is.na(dti), mean(dti), dti), #A ratio calculated using the borrower’s total monthly debt payments on the total debt obligations, excluding mortgage and the requested LC loan, divided by the borrower’s self-reported monthly income.
+  revol_until<- ifelse(is.na(revol_until), mean(revol_until), revol_until),
+  tot_coll_amt <- ifelse(is.na(tot_coll_amt), mean(tot_coll_amt), tot_coll_amt),
+  tot_cur_bal <- ifelse(is.na(tot_cur_bal), mean(tot_cur_bal), tot_cur_bal),
+  total_rev_hi_lim <- ifelse(is.na(total_rev_hi_lim), mean(total_rev_hi_lim), total_rev_hi_lim),
+  acc_open_past_24mths <- ifelse(is.na(acc_open_past_24mths), mean(acc_open_past_24mths), acc_open_past_24mths),
+  avg_cur_bal <- ifelse(is.na(avg_cur_bal), mean(avg_cur_bal), avg_cur_bal),
+  bc_open_to_buy <- ifelse(is.na(bc_open_to_buy), mean(bc_open_to_buy), bc_open_to_buy),
+  bc_util <- ifelse(is.na(bc_util), mean(bc_util), bc_util)
+  )
+```
+
+```{r Feature engineer - transform categorical variable}
+da2$loan_status<-as.factor(da2$loan_status)
+da2$purpose <- as.factor(da2$purpose)
+da2$grade <- as.factor(da2$grade)
+loan$term<-as.factor(da2$term)
+da2$sub_grade<-as.factor(da2$sub_grade)
+da2$emp_length<-as.factor(da2$emp_length)
+da2$home_ownership<-as.factor(da2$home_ownership)
+da2$verification_status<-as.factor(da2$verification_status)
+da2$pymnt_plan<-as.factor(da2$pymnt_plan)
+da2$addr_state<-as.factor(da2$addr_state)
+```
+
+
+```{r data split}
+trainindices <- sample(1:nrow(da), .80*nrow(da))
+testindices <- setdiff(1:nrow(da), trainindices)   
+trainset <- da[trainindices,]
+testset <- da[testindices,]
+```
+
+```{r multicolinearity}
+reg <- lm(target~., data = trainset)
+car::vif(reg)
+
+```
+```{r feature selection}
+rf <- randomForest(target ~ .,data=trainset, ntree=100, mtry=5,
+                   importance=TRUE)
+plot(rf)
+rf
+importance(rf)[order(importance(rf)[,"MeanDecreaseAccuracy"], decreasing=T),]
+varImpPlot(rf)
+varImp(rf)
+```
+```{r model}
+bst <- xgboost(data = as.matrix(trainset), label = train$target, max.depth = 2, eta = 1, nthread = 2, nrounds = 2, objective = "binary:logistic", verbose = 0)
+pred <- predict(bst, testset)
+print(head(pred))
+prob <- mean(bst$predicted =='Yes')
+```
+
+
+
+
+
+
+
